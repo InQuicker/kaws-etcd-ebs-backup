@@ -1,0 +1,53 @@
+#!/usr/bin/env ruby
+
+$stdout.sync = true
+$stderr.sync = true
+
+require 'bundler'
+
+Bundler.require
+
+require 'active_support/core_ext/numeric/time'
+
+THRESHOLD = 7.days.ago.freeze
+
+ec2 = Aws::EC2::Client.new
+
+# Determine the EBS volume IDs for etcd's data on each instance.
+volume_ids = ec2
+  .describe_instances(filters: [{ name: "tag:Name", values: ENV.fetch("INSTANCE_NAMES").split(/,/)}])
+  .reservations
+  .flat_map { |reservation| reservation.instances }
+  .flat_map { |instance| instance.block_device_mappings }
+  .select { |mapping| mapping.device_name == "/dev/xvdf" }
+  .map { |mapping| mapping.ebs.volume_id }
+
+# Create a snapshot of each volume.
+snapshots = volume_ids.map { |volume_id| ec2.create_snapshot(volume_id: volume_id) }
+snapshots.each do |snapshot|
+  puts "Creating snapshot of EBS volume. volume_id: #{snapshot.volume_id} snapshot_id: #{snapshot.snapshot_id}"
+end
+snapshot_ids = snapshots.map { |snapshot| snapshot.snapshot_id }
+
+# Wait for each snapshot to complete.
+begin
+  ec2.wait_until(:snapshot_completed, snapshot_ids: snapshot_ids)
+  puts "Snapshots completed. snapshot_ids: #{snapshot_ids.join(',')}"
+rescue Aws::Waiters::Errors::WaiterFailed
+  puts "ERROR: One or more snapshots never completed. snapshot_ids: #{snapshot_ids.join(',')}"
+end
+
+# Determine the EBS snapshots that are older than a week.
+old_snapshots = []
+ec2.describe_snapshots(filters: [{ name: "volume-id", values: volume_ids }]).each do |response|
+  response.snapshots.each do |snapshot|
+    if snapshot.start_time < THRESHOLD
+      old_snapshots << snapshot
+    end
+  end
+end
+
+old_snapshots.each do |old_snapshot|
+  ec2.delete_snapshot(snapshot_id: old_snapshot.snapshot_id)
+  puts "Deleted old EBS snapshot. volume_id: #{old_snapshot.volume_id} snapshot_id: #{old_snapshot.snapshot_id}"
+end
