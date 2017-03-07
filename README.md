@@ -12,7 +12,7 @@ It will then delete snapshots of these volumes that are more than 7 days old.
 
 Environment variables:
 
-* `INSTANCE_NAMES` (required): a common separated list of values to be used to filter EC2 instances by their "Name" tag.
+* `INSTANCE_NAMES` (required): a comma separated list of values to be used to filter EC2 instances by their "Name" tag.
 
 ## Legal
 
